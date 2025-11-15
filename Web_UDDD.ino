@@ -20,7 +20,7 @@
 #define CO2_PIN 35
 
 // Cấu hình WiFi
-const char* WIFI_SSID = "."; // *** NHỚ ĐIỀN WIFI CỦA BẠN ***
+const char* WIFI_SSID = "."; // *** NHỚ ĐIỀN WIFI ***
 const char* WIFI_PASSWORD = "12345678"; // *** NHỚ ĐIỀN MẬT KHẨU WIFI ***
 
 // Cấu hình NTP
@@ -31,7 +31,7 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200, 60000); // 25200 = GMT+7
 unsigned long lastFirebaseSend = 0;
 unsigned long lastHistorySave = 0;
 
-// ====== SENSOR MANAGER (Giữ nguyên) ======
+// ====== SENSOR MANAGER ======
 class SensorManager {
 public:
     static void initialize() {
@@ -51,7 +51,7 @@ private:
 DHT SensorManager::_dht(DHT_PIN, DHT_TYPE);
 BH1750 SensorManager::_lightMeter;
 
-// ====== DEVICE MANAGER (Giữ nguyên) ======
+// ====== DEVICE MANAGER ======
 class DeviceManager {
 public:
     static void initialize() {
@@ -70,7 +70,7 @@ private:
 };
 bool DeviceManager::_fan=false; bool DeviceManager::_pump=false; bool DeviceManager::_light=false;
 
-// ====== HISTORY MANAGER (Giữ nguyên) ======
+// ====== HISTORY MANAGER ======
 class HistoryManager {
 public:
     static void initialize(){ if(!SPIFFS.begin(true)) Serial.println("SPIFFS init failed"); }
@@ -92,7 +92,7 @@ public:
     }
 };
 
-// ====== AUTOMATION MANAGER (*** SỬA LẠI LOGIC ***) ======
+// ====== AUTOMATION MANAGER ======
 // Struct định nghĩa ngưỡng, với giá trị mặc định
 struct SensorThresholds {
   float tHigh=30,tLow=27; int sDry=4000,sWet=3000; int lDark=50,lBright=300; int cHigh=1000,cLow=400;
@@ -135,7 +135,7 @@ public:
     static bool isAutoMode(){ return _autoMode; }
     static void setAutoMode(bool mode){ _autoMode = mode; }
     
-    // *** MỚI: Các hàm để set/get ngưỡng ***
+    // *** Các hàm để set/get ngưỡng ***
     static void setThresholds(const SensorThresholds& newThresholds) {
         _th = newThresholds;
         Serial.println("Thresholds updated.");
@@ -154,7 +154,7 @@ private:
 SensorThresholds AutomationManager::_th;
 bool AutomationManager::_autoMode;
 
-// ====== FIREBASE MANAGER (*** THÊM LẠI PHẦN BỊ THIẾU ***) ======
+// ====== FIREBASE MANAGER  ======
 class FirebaseManager {
 public:
     static void initialize(){
@@ -183,7 +183,7 @@ public:
         doc["light"]=DeviceManager::light();
         doc["autoMode"]=AutomationManager::isAutoMode();
         
-        // *** MỚI: Thêm object ngưỡng vào payload ***
+        //  Thêm object ngưỡng vào payload ***
         // Ứng dụng Flutter của bạn sẽ đọc object này từ log mới nhất
         const SensorThresholds& th = AutomationManager::getThresholds();
         JsonObject thresholdsObj = doc.createNestedObject("thresholds");
