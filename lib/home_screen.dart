@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'sensor_chart_screen.dart';
+import 'threshold_settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -12,16 +13,27 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // --- Các biến và hàm logic (Giữ nguyên) ---
+  // --- Firebase References ---
+
+  /// Node chứa dữ liệu cảm biến và trạng thái thiết bị thực tế từ ESP32.
   final DatabaseReference sensorRef = FirebaseDatabase.instance.ref(
     "sensorData",
   );
+
+  /// Node gửi lệnh điều khiển xuống ESP32.
   final DatabaseReference controlRef = FirebaseDatabase.instance.ref(
     "controls",
   );
 
+  // --- Local State ---
+
+  /// Timer đếm ngược để tự động bật lại Auto Mode sau khi can thiệp thủ công.
   Timer? _autoModeTimer;
+
+  /// Biến cục bộ lưu trạng thái Auto Mode để xử lý logic nhanh tại client.
   bool _currentAutoMode = true;
+
+  // --- Logic Methods ---
 
   void _setControl(String device, bool value) {
     controlRef.child(device).set(value);
@@ -33,30 +45,42 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  /// Xử lý khi điều khiển thiết bị thủ công.
+  /// Logic: Tạm thời tắt Auto Mode và đặt lịch tự động bật lại sau 30s.
   void _handleManualControl(String device, bool value) {
     _autoModeTimer?.cancel();
+
     Map<String, dynamic> updates = {};
+
+    // Nếu đang Auto, cần tắt Auto đi để tránh xung đột lệnh với ESP32
     if (_currentAutoMode) {
       updates["autoMode"] = false;
     }
+
     updates[device] = value;
     controlRef.update(updates);
+
+    // Đặt timer khôi phục chế độ tự động
     _autoModeTimer = Timer(const Duration(seconds: 30), () {
       _setControl("autoMode", true);
     });
   }
 
+  /// Xử lý bật/tắt chế độ tự động.
+  /// Nếu tắt thủ công, cũng sẽ tự bật lại sau 30s (theo yêu cầu an toàn).
   void _handleAutoModeChange(bool value) {
     _autoModeTimer?.cancel();
+
     if (value == false) {
       _autoModeTimer = Timer(const Duration(seconds: 30), () {
         _setControl("autoMode", true);
       });
     }
+
     _setControl("autoMode", value);
   }
 
-  // --- Hàm Build (Giữ nguyên cấu trúc) ---
+  // --- UI Build Methods ---
 
   @override
   Widget build(BuildContext context) {
@@ -64,6 +88,20 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text("Smart Greenhouse"),
         backgroundColor: Colors.green[700],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: "Cài đặt ngưỡng",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const ThresholdSettingsScreen(),
+                ),
+              );
+            },
+          ),
+        ],
       ),
       backgroundColor: Colors.grey[100],
       body: ListView(
@@ -76,7 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 16),
-          _buildSensorSection(), // Widget cảm biến
+          _buildSensorSection(),
           const SizedBox(height: 16),
           const Divider(),
           const SizedBox(height: 16),
@@ -87,18 +125,18 @@ class _HomeScreenState extends State<HomeScreen> {
             ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
-          _buildControlSection(), // Widget điều khiển (giữ nguyên)
+          _buildControlSection(),
         ],
       ),
     );
   }
 
-  // --- Các Widget Helper (Đã thiết kế lại) ---
-
-  // *** THIẾT KẾ LẠI: Dùng GridView cho các đồng hồ đo ***
   Widget _buildSensorSection() {
     return StreamBuilder(
-      stream: sensorRef.onValue,
+      // LƯU Ý QUAN TRỌNG:
+      // Sử dụng .limitToLast(1) để chỉ lấy bản ghi mới nhất.
+      // Tránh dùng .onValue trực tiếp trên node lớn vì sẽ tải toàn bộ lịch sử gây lag và tốn chi phí.
+      stream: sensorRef.orderByKey().limitToLast(1).onValue,
       builder: (context, AsyncSnapshot<DatabaseEvent> snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -106,34 +144,35 @@ class _HomeScreenState extends State<HomeScreen> {
         if (!snapshot.hasData || snapshot.data?.snapshot.value == null) {
           return const Center(child: Text("Không có dữ liệu cảm biến"));
         }
+
+        // Parse dữ liệu an toàn từ Snapshot
         Map<dynamic, dynamic> allData =
             snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
-        var lastKey = allData.keys.last;
+        var lastKey = allData.keys.first;
         Map<dynamic, dynamic> data = allData[lastKey];
 
-        // Lấy dữ liệu
         double temp = (data['temperature'] ?? 0.0).toDouble();
         double humi = (data['humidity'] ?? 0.0).toDouble();
         int soil = (data['soilMoisture'] ?? 0).toInt();
         double lightLux = (data['lightLevel'] ?? 0.0).toDouble();
         int co2 = (data['co2Level'] ?? 0).toInt();
 
-        // --- Tính toán % cho đồng hồ đo (Giữ nguyên logic) ---
+        // Tính toán progress (0.0 -> 1.0) cho gauge
         double tempProgress = (temp / 50.0).clamp(0.0, 1.0);
         double humiProgress = (humi / 100.0).clamp(0.0, 1.0);
-        // Giả định: 4095 là khô (0%), 1000 là ướt (100%)
-        double soilProgress = ((4095 - soil) / (4095 - 1000)).clamp(0.0, 1.0);
+        double soilProgress = ((4095 - soil) / (4095 - 1000)).clamp(
+          0.0,
+          1.0,
+        ); // 4095: Khô, 1000: Ướt
         double lightProgress = (lightLux / 1500.0).clamp(0.0, 1.0);
         double co2Progress = (co2 / 2000.0).clamp(0.0, 1.0);
 
-        // *** SỬA ĐỔI: Dùng 3 CỘT (crossAxisCount: 3) để nhỏ hơn ***
         return GridView.count(
-          crossAxisCount: 3, // 3 cột
+          crossAxisCount: 3,
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          mainAxisSpacing: 10, // Giảm khoảng cách giữa các hàng
-          crossAxisSpacing: 10, // Giảm khoảng cách giữa các cột
-          // *** SỬA ĐỔI: Tăng childAspectRatio để card "vuông" hơn, nhìn nhỏ hơn ***
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 10,
           childAspectRatio: 1.05,
           children: [
             _buildSensorGauge(
@@ -154,18 +193,15 @@ class _HomeScreenState extends State<HomeScreen> {
               color: Colors.blue,
               progress: humiProgress,
             ),
-
-            // *** SỬA ĐỔI: Độ ẩm đất - HIỂN THỊ GIÁ TRỊ THÔ (không %) ***
             _buildSensorGauge(
               title: "Độ ẩm đất",
               sensorKey: "soilMoisture",
-              value: soil.toString(), // <-- HIỂN THỊ GIÁ TRỊ THÔ
-              unit: "", // <-- KHÔNG CÓ ĐƠN VỊ
+              value: soil.toString(),
+              unit: "",
               icon: Icons.eco_outlined,
               color: Colors.brown,
-              progress: soilProgress, // <-- Progress bar vẫn chạy đúng
+              progress: soilProgress,
             ),
-
             _buildSensorGauge(
               title: "Ánh sáng",
               sensorKey: "lightLevel",
@@ -190,7 +226,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // *** SỬA ĐỔI: Widget đồng hồ đo (Gauge) (Chỉnh kích thước chi tiết) ***
+  /// Widget hiển thị đồng hồ đo (Gauge) cho từng cảm biến
   Widget _buildSensorGauge({
     required String title,
     required String sensorKey,
@@ -215,24 +251,21 @@ class _HomeScreenState extends State<HomeScreen> {
         elevation: 2,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: Padding(
-          // *** SỬA ĐỔI: Giảm padding trong card ***
           padding: const EdgeInsets.all(8.0),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // --- Phần đồng hồ tròn ---
               Expanded(
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
-                    // Vòng tròn nền
+                    // Background Circle
                     SizedBox(
                       width: double.infinity,
                       height: double.infinity,
                       child: CircularProgressIndicator(
                         value: 1.0,
-                        // *** SỬA ĐỔI: Vòng tròn mỏng hơn nữa ***
                         strokeWidth: 6,
                         backgroundColor: color.withOpacity(0.1),
                         valueColor: AlwaysStoppedAnimation<Color>(
@@ -240,41 +273,37 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                     ),
-                    // Vòng tròn giá trị
+                    // Value Circle
                     SizedBox(
                       width: double.infinity,
                       height: double.infinity,
                       child: CircularProgressIndicator(
                         value: progress,
-                        // *** SỬA ĐỔI: Vòng tròn mỏng hơn nữa ***
                         strokeWidth: 6,
                         valueColor: AlwaysStoppedAnimation<Color>(color),
                         strokeCap: StrokeCap.round,
                       ),
                     ),
-                    // Icon và Giá trị ở giữa
+                    // Center Info
                     Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        // *** SỬA ĐỔI: Icon nhỏ hơn nữa ***
                         Icon(icon, color: color, size: 22),
                         const SizedBox(height: 2),
                         Text(
                           value,
-                          // *** SỬA ĐỔI: Font chữ nhỏ hơn nữa ***
                           style: Theme.of(context).textTheme.titleLarge
                               ?.copyWith(
                                 fontWeight: FontWeight.bold,
                                 color: color,
-                                fontSize: 16, // Cố định cỡ chữ
+                                fontSize: 16,
                               ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        if (unit.isNotEmpty) // Chỉ hiển thị nếu có đơn vị
+                        if (unit.isNotEmpty)
                           Text(
                             unit,
-                            // *** SỬA ĐỔI: Font chữ nhỏ hơn nữa ***
                             style: TextStyle(
                               color: Colors.grey[600],
                               fontSize: 10,
@@ -285,13 +314,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
-              // Giảm khoảng cách giữa vòng tròn và tiêu đề
               const SizedBox(height: 6),
-              // --- Tiêu đề ---
               Text(
                 title,
                 style: const TextStyle(
-                  // *** SỬA ĐỔI: Font chữ nhỏ hơn nữa ***
                   fontSize: 12,
                   fontWeight: FontWeight.bold,
                 ),
@@ -306,22 +332,26 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // --- PHẦN ĐIỀU KHIỂN (GIỮ NGUYÊN) ---
-
-  // *** GIỮ NGUYÊN: Widget điều khiển dạng danh sách ***
   Widget _buildControlSection() {
+    // Stream này lắng nghe phản hồi trạng thái thực tế từ thiết bị (qua sensorRef)
     return StreamBuilder(
-      stream: controlRef.onValue,
+      stream: sensorRef.orderByKey().limitToLast(1).onValue,
       builder: (context, AsyncSnapshot<DatabaseEvent> snapshot) {
-        if (!snapshot.hasData) {
+        if (!snapshot.hasData || snapshot.data?.snapshot.value == null) {
           return const Center(child: Text("Đang tải..."));
         }
-        Map<dynamic, dynamic> data =
+
+        Map<dynamic, dynamic> allData =
             snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
+        var lastKey = allData.keys.first;
+        Map<dynamic, dynamic> data = allData[lastKey];
+
         bool fanState = data['fan'] ?? false;
         bool pumpState = data['pump'] ?? false;
         bool lightState = data['light'] ?? false;
         bool autoMode = data['autoMode'] ?? true;
+
+        // Đồng bộ biến cục bộ để dùng cho logic _handleManualControl
         _currentAutoMode = autoMode;
 
         return Column(
@@ -331,36 +361,28 @@ class _HomeScreenState extends State<HomeScreen> {
               subtitle: autoMode ? "ĐANG BẬT" : "THỦ CÔNG (Tự bật sau 30s)",
               icon: autoMode ? Icons.auto_awesome : Icons.touch_app,
               isActived: autoMode,
-              onPressed: () {
-                _handleAutoModeChange(!autoMode);
-              },
+              onPressed: () => _handleAutoModeChange(!autoMode),
             ),
             _buildControlTile(
               title: "Quạt",
               subtitle: fanState ? "ĐANG BẬT" : "ĐANG TẮT",
               icon: Icons.air_outlined,
               isActived: fanState,
-              onPressed: () {
-                _handleManualControl("fan", !fanState);
-              },
+              onPressed: () => _handleManualControl("fan", !fanState),
             ),
             _buildControlTile(
               title: "Bơm",
               subtitle: pumpState ? "ĐANG BẬT" : "ĐANG TẮT",
               icon: Icons.water_damage_outlined,
               isActived: pumpState,
-              onPressed: () {
-                _handleManualControl("pump", !pumpState);
-              },
+              onPressed: () => _handleManualControl("pump", !pumpState),
             ),
             _buildControlTile(
               title: "Đèn",
               subtitle: lightState ? "ĐANG BẬT" : "ĐANG TẮT",
               icon: Icons.lightbulb_outline,
               isActived: lightState,
-              onPressed: () {
-                _handleManualControl("light", !lightState);
-              },
+              onPressed: () => _handleManualControl("light", !lightState),
             ),
           ],
         );
@@ -368,7 +390,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // *** GIỮ NGUYÊN: Widget Điều khiển dạng ListTile có thể "Nhấn" ***
   Widget _buildControlTile({
     required String title,
     required String subtitle,
